@@ -1,4 +1,6 @@
 # Team Helper
+<img width="3840" height="1920" alt="image" src="https://github.com/user-attachments/assets/e5fcd950-7844-4ff7-be00-28246024a847" />
+
 <img width="3840" height="1922" alt="image" src="https://github.com/user-attachments/assets/06e169e2-dfd3-4324-82ef-950bc96102c8" />
 
 一个多渠道 Team 账号管理与兑换平台，支持多种订单渠道接入、自动发货、积分体系和权限管理。使用 Vue 3、Node.js、shadcn-vue 和 SQLite 构建。
