@@ -610,6 +610,10 @@ export interface OpenAccountsResponse {
     creditCost: string
     dailyLimit: number | null
     todayBoardCount: number
+    userDailyLimitEnabled?: boolean
+    userDailyLimit?: number | null
+    userTodayBoardCount?: number
+    userDailyLimitRemaining?: number | null
     redeemBlockedHours?: { start: number; end: number }
     redeemBlockedNow?: boolean
     redeemBlockedMessage?: string
@@ -668,6 +672,17 @@ export interface CreditAdminBalanceResponse {
 
 export interface CreditAdminRefundResponse {
   message: string
+}
+
+export interface CreditAdminSyncResponse {
+  message: string
+  order?: {
+    orderNo: string
+    status: string
+    tradeNo?: string | null
+    paidAt?: string | null
+    refundedAt?: string | null
+  }
 }
 
 export interface WaitingRoomEntry {
@@ -1500,7 +1515,12 @@ export const creditService = {
   async adminRefundOrder(orderNo: string): Promise<CreditAdminRefundResponse> {
     const response = await api.post(`/credit/admin/orders/${encodeURIComponent(orderNo)}/refund`)
     return response.data
-  }
+  },
+
+  async adminSyncOrder(orderNo: string): Promise<CreditAdminSyncResponse> {
+    const response = await api.post(`/credit/admin/orders/${encodeURIComponent(orderNo)}/sync`)
+    return response.data
+  },
 }
 
 export const waitingRoomService = {
