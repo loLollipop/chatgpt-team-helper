@@ -103,6 +103,15 @@ const isJwtExpired = (token, skewMs = 30 * 1000) => {
   return expiryMs <= Date.now() + Math.max(0, Number(skewMs) || 0)
 }
 
+const shouldRefreshTokenBeforeCheck = (token) => {
+  const normalizedToken = String(token || '').trim()
+  if (!normalizedToken) return true
+  const expiryMs = inferJwtExpiryMs(normalizedToken)
+  // Non-JWT / no-exp token (e.g. sess-xxx) should refresh when refresh_token is provided.
+  if (expiryMs == null) return true
+  return isJwtExpired(normalizedToken)
+}
+
 const inferEmailFromTokens = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
   const accessPayload = decodeJwtPayloadSafely(accessToken)
@@ -626,8 +635,8 @@ router.post('/check-token', async (req, res) => {
     normalizedRefreshToken = String(refreshToken ?? '').trim()
     latestAccessToken = normalizedToken
 
-    // 如果 access token 本地解析已过期，则优先尝试 refresh，避免前端直接看到"token 过期"。
-    if (normalizedRefreshToken && isJwtExpired(normalizedToken)) {
+    // 如果 access token 为空、已过期，或不是可解析 exp 的 JWT（如 sess-xxx），则优先 refresh。
+    if (normalizedRefreshToken && shouldRefreshTokenBeforeCheck(normalizedToken)) {
       refreshAttempted = true
       const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
       const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
