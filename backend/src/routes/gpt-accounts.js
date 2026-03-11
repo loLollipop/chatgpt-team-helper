@@ -197,7 +197,7 @@ const refreshAccessTokenWithRefreshToken = async (refreshToken) => {
     grant_type: 'refresh_token',
     client_id: OPENAI_CLIENT_ID,
     refresh_token: normalized,
-    scope: 'openid profile email'
+    scope: 'openid profile email offline_access'
   }).toString()
 
   const requestOptions = {
@@ -473,7 +473,9 @@ router.post('/check-token', async (req, res) => {
       return res.json({ accounts, tokenRefreshed: false, inferredEmail: inferredEmail || null })
     } catch (error) {
       const status = Number(error?.status || 0)
-      if (status !== 401 || !normalizedRefreshToken) {
+      const message = String(error?.message || '')
+      const looksLikeExpiredToken = message.includes('Token 已过期或无效') || message.toLowerCase().includes('expired')
+      if ((status !== 401 && !looksLikeExpiredToken) || !normalizedRefreshToken) {
         throw error
       }
 
@@ -483,7 +485,17 @@ router.post('/check-token', async (req, res) => {
         throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
       }
 
-      const refreshedAccounts = await fetchOpenAiAccountInfo(refreshedAccessToken, proxy ?? null)
+      let refreshedAccounts
+      try {
+        refreshedAccounts = await fetchOpenAiAccountInfo(refreshedAccessToken, proxy ?? null)
+      } catch (recheckError) {
+        const reStatus = Number(recheckError?.status || 0)
+        const reMessage = String(recheckError?.message || '')
+        if (reStatus === 401 || reMessage.includes('Token 已过期或无效')) {
+          throw new AccountSyncError('Access Token 已刷新，但仍校验失败：请确认 refresh token 与 access token 属于同一账号', 401)
+        }
+        throw recheckError
+      }
       const inferredEmail = inferEmailFromTokens({
         accessToken: refreshedAccessToken,
         idToken: refreshedTokens?.idToken
