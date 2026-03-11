@@ -93,16 +93,45 @@ const decodeJwtPayloadSafely = (token) => {
 const inferEmailFromTokens = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
   const accessPayload = decodeJwtPayloadSafely(accessToken)
+
+  const idProfile = idPayload?.['https://api.openai.com/profile'] || {}
+  const accessProfile = accessPayload?.['https://api.openai.com/profile'] || {}
+  const idAuthClaims = idPayload?.['https://api.openai.com/auth'] || {}
+  const accessAuthClaims = accessPayload?.['https://api.openai.com/auth'] || {}
+
   const candidates = [
     idPayload?.email,
     accessPayload?.email,
+    idPayload?.preferred_username,
     accessPayload?.preferred_username,
-    accessPayload?.upn
+    idPayload?.upn,
+    accessPayload?.upn,
+    idProfile?.email,
+    accessProfile?.email,
+    idPayload?.profile?.email,
+    accessPayload?.profile?.email,
+    idAuthClaims?.email,
+    accessAuthClaims?.email,
+    idPayload?.user?.email,
+    accessPayload?.user?.email,
+    idPayload?.['https://api.openai.com/user']?.email,
+    accessPayload?.['https://api.openai.com/user']?.email
   ]
 
   for (const value of candidates) {
     const normalized = normalizeEmail(value)
     if (normalized) return normalized
+  }
+
+  const scanObjects = [idProfile, accessProfile, idAuthClaims, accessAuthClaims, idPayload, accessPayload]
+  for (const source of scanObjects) {
+    if (!source || typeof source !== 'object') continue
+    for (const [key, value] of Object.entries(source)) {
+      if (typeof value !== 'string') continue
+      if (!/email/i.test(String(key))) continue
+      const normalized = normalizeEmail(value)
+      if (normalized) return normalized
+    }
   }
 
   return ''
