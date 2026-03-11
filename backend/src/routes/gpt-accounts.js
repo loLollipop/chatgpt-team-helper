@@ -90,6 +90,19 @@ const decodeJwtPayloadSafely = (token) => {
   }
 }
 
+const inferJwtExpiryMs = (token) => {
+  const payload = decodeJwtPayloadSafely(token)
+  const exp = Number(payload?.exp)
+  if (!Number.isFinite(exp) || exp <= 0) return null
+  return exp * 1000
+}
+
+const isJwtExpired = (token, skewMs = 30 * 1000) => {
+  const expiryMs = inferJwtExpiryMs(token)
+  if (expiryMs == null) return false
+  return expiryMs <= Date.now() + Math.max(0, Number(skewMs) || 0)
+}
+
 const inferEmailFromTokens = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
   const accessPayload = decodeJwtPayloadSafely(accessToken)
@@ -569,12 +582,29 @@ router.post('/check-token', async (req, res) => {
   let latestAccessToken = ''
   let latestIdToken = ''
   let refreshAttempted = false
+  let preflightRefreshed = false
 
   try {
     const { token, refreshToken, proxy } = req.body || {}
     normalizedToken = String(token ?? '').trim()
     normalizedRefreshToken = String(refreshToken ?? '').trim()
     latestAccessToken = normalizedToken
+
+    // 如果 access token 本地解析已过期，则优先尝试 refresh，避免前端直接看到“token 过期”。
+    if (normalizedRefreshToken && isJwtExpired(normalizedToken)) {
+      refreshAttempted = true
+      const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+      const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+      if (!refreshedAccessToken) {
+        throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
+      }
+
+      latestAccessToken = refreshedAccessToken
+      latestIdToken = String(refreshedTokens?.idToken || '').trim()
+      normalizedToken = refreshedAccessToken
+      normalizedRefreshToken = String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
+      preflightRefreshed = true
+    }
 
     if (!normalizedToken) {
       return res.status(400).json({ error: 'token is required' })
@@ -585,9 +615,17 @@ router.post('/check-token', async (req, res) => {
       const hints = inferTokenHints({ accessToken: normalizedToken })
       return res.json({
         accounts,
-        tokenRefreshed: false,
+        tokenRefreshed: preflightRefreshed,
         inferredEmail: hints.inferredEmail || null,
-        inferredChatgptAccountId: hints.inferredChatgptAccountId || null
+        inferredChatgptAccountId: hints.inferredChatgptAccountId || null,
+        ...(preflightRefreshed
+          ? {
+              tokens: {
+                accessToken: normalizedToken,
+                refreshToken: normalizedRefreshToken || null
+              }
+            }
+          : {})
       })
     } catch (error) {
       const canRetryWithRefresh = shouldAttemptRefreshForTokenError(error)
