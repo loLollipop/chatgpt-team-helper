@@ -380,40 +380,28 @@ const resolveImportTokens = async ({ token, refreshToken }) => {
     }
   }
 
-  // Refresh when:
-  // 1. No access token provided
-  // 2. JWT is detected as expired
-  // 3. JWT expiry can't be determined (no exp claim / not a valid JWT) — treat refresh token as source of truth
-  const expiryMs = inferJwtExpiryMs(normalizedToken)
-  const shouldRefresh = !normalizedToken || isJwtExpired(normalizedToken) || expiryMs === null
-
-  if (shouldRefresh) {
-    try {
-      const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
-      const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
-      if (!refreshedAccessToken) {
-        throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
-      }
-      return {
-        accessToken: refreshedAccessToken,
-        refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
-      }
-    } catch (error) {
-      // If refresh fails but we still have an original token, fall back to it rather than hard-failing
-      if (normalizedToken) {
-        console.warn('resolveImportTokens: refresh token 刷新失败，回退使用原始 access token:', error?.message || error)
-        return {
-          accessToken: normalizedToken,
-          refreshToken: normalizedRefreshToken
-        }
-      }
-      throw error
+  // Import path: when refresh token is provided, always prefer refreshing once so that
+  // the persisted access token is as fresh as possible.
+  try {
+    const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+    const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+    if (!refreshedAccessToken) {
+      throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
     }
-  }
-
-  return {
-    accessToken: normalizedToken,
-    refreshToken: normalizedRefreshToken
+    return {
+      accessToken: refreshedAccessToken,
+      refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
+    }
+  } catch (error) {
+    // If refresh fails but we still have an original token, fall back to it rather than hard-failing.
+    if (normalizedToken) {
+      console.warn('resolveImportTokens: refresh token 刷新失败，回退使用原始 access token:', error?.message || error)
+      return {
+        accessToken: normalizedToken,
+        refreshToken: normalizedRefreshToken
+      }
+    }
+    throw error
   }
 }
 
@@ -1022,17 +1010,23 @@ router.post('/', async (req, res) => {
     }
     const isBannedValue = normalizedIsBanned ? 1 : 0
 
-    const normalizedChatgptAccountId = String(chatgptAccountId ?? '').trim()
+    let normalizedChatgptAccountId = String(chatgptAccountId ?? '').trim()
     const normalizedOaiDeviceId = String(oaiDeviceId ?? '').trim()
     const normalizedExpireAt = normalizeExpireAt(expireAt)
-
-    if (!email || !token || !normalizedChatgptAccountId) {
-      return res.status(400).json({ error: 'Email, token and ChatGPT ID are required' })
-    }
 
     const resolvedTokens = await resolveImportTokens({ token, refreshToken })
     if (!resolvedTokens.accessToken) {
       return res.status(400).json({ error: 'Access token is required' })
+    }
+
+    const hints = inferTokenHints({ accessToken: resolvedTokens.accessToken })
+    const normalizedEmail = normalizeEmail(email || hints.inferredEmail || '')
+    if (!normalizedChatgptAccountId && hints.inferredChatgptAccountId) {
+      normalizedChatgptAccountId = String(hints.inferredChatgptAccountId).trim()
+    }
+
+    if (!normalizedEmail || !normalizedChatgptAccountId) {
+      return res.status(400).json({ error: 'Email and ChatGPT ID are required' })
     }
 
     if (expireAt != null && String(expireAt).trim() && !normalizedExpireAt) {
@@ -1041,8 +1035,6 @@ router.post('/', async (req, res) => {
         message: 'expireAt 格式错误，请使用 YYYY/MM/DD HH:mm'
       })
     }
-
-    const normalizedEmail = normalizeEmail(email)
 
     const db = await getDatabase()
 
@@ -1154,6 +1146,9 @@ router.post('/', async (req, res) => {
     })
   } catch (error) {
     console.error('Create GPT account error:', error)
+    if (error instanceof AccountSyncError || error?.status) {
+      return res.status(error.status || 500).json({ error: error.message })
+    }
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -1164,7 +1159,7 @@ router.put('/:id', async (req, res) => {
     const body = req.body || {}
     const { email, token, refreshToken, userCount, chatgptAccountId, oaiDeviceId, expireAt } = body
 
-    const normalizedChatgptAccountId = String(chatgptAccountId ?? '').trim()
+    let normalizedChatgptAccountId = String(chatgptAccountId ?? '').trim()
     const normalizedOaiDeviceId = String(oaiDeviceId ?? '').trim()
     const hasExpireAt = Object.prototype.hasOwnProperty.call(body, 'expireAt')
     const normalizedExpireAt = hasExpireAt ? normalizeExpireAt(expireAt) : null
@@ -1181,13 +1176,19 @@ router.put('/:id', async (req, res) => {
     const isBannedValue = normalizedIsBanned ? 1 : 0
     const shouldApplyBanSideEffects = shouldUpdateIsBanned && isBannedValue === 1
 
-    if (!email || !token || !normalizedChatgptAccountId) {
-      return res.status(400).json({ error: 'Email, token and ChatGPT ID are required' })
-    }
-
     const resolvedTokens = await resolveImportTokens({ token, refreshToken })
     if (!resolvedTokens.accessToken) {
       return res.status(400).json({ error: 'Access token is required' })
+    }
+
+    const hints = inferTokenHints({ accessToken: resolvedTokens.accessToken })
+    const normalizedEmail = normalizeEmail(email || hints.inferredEmail || '')
+    if (!normalizedChatgptAccountId && hints.inferredChatgptAccountId) {
+      normalizedChatgptAccountId = String(hints.inferredChatgptAccountId).trim()
+    }
+
+    if (!normalizedEmail || !normalizedChatgptAccountId) {
+      return res.status(400).json({ error: 'Email and ChatGPT ID are required' })
     }
 
     if (hasExpireAt && expireAt != null && String(expireAt).trim() && !normalizedExpireAt) {
@@ -1222,7 +1223,7 @@ router.put('/:id', async (req, res) => {
            updated_at = DATETIME('now', 'localtime')
        WHERE id = ?`,
       [
-        email,
+        normalizedEmail,
         resolvedTokens.accessToken,
         resolvedTokens.refreshToken || null,
         userCount || 0,
@@ -1238,10 +1239,10 @@ router.put('/:id', async (req, res) => {
       ]
     )
 
-    if (existingEmail && existingEmail !== email) {
+    if (existingEmail && existingEmail !== normalizedEmail) {
       db.run(
         `UPDATE redemption_codes SET account_email = ?, updated_at = DATETIME('now', 'localtime') WHERE account_email = ?`,
-        [email, existingEmail]
+        [normalizedEmail, existingEmail]
       )
     }
     saveDatabase()
@@ -1275,6 +1276,9 @@ router.put('/:id', async (req, res) => {
     res.json(account)
   } catch (error) {
     console.error('Update GPT account error:', error)
+    if (error instanceof AccountSyncError || error?.status) {
+      return res.status(error.status || 500).json({ error: error.message })
+    }
     res.status(500).json({ error: 'Internal server error' })
   }
 })
