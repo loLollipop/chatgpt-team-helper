@@ -513,8 +513,9 @@ const openChatgptIdDropdown = async () => {
 
 const handleCheckAccessToken = async () => {
   const token = String(formData.value.token || '').trim()
-  if (!token) {
-    showErrorToast('请先填写 Access Token')
+  const refreshToken = String(formData.value.refreshToken || '').trim()
+  if (!token && !refreshToken) {
+    showErrorToast('请先填写 Access Token 或 Refresh Token')
     return
   }
 
@@ -522,7 +523,6 @@ const handleCheckAccessToken = async () => {
     checkingAccessToken.value = true
     checkAccessTokenError.value = ''
 
-    const refreshToken = String(formData.value.refreshToken || '').trim()
     const result = await gptAccountService.checkAccessToken(token, refreshToken || undefined)
     checkedChatgptAccounts.value = Array.isArray(result?.accounts) ? result.accounts : []
 

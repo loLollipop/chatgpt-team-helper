@@ -646,8 +646,9 @@ router.post('/check-token', async (req, res) => {
     normalizedRefreshToken = String(refreshToken ?? '').trim()
     latestAccessToken = normalizedToken
 
-    // 预检刷新：token 为空 / 已过期 JWT / 非 JWT（如 sess-xxx）时，优先 refresh。
-    if (normalizedRefreshToken && tokenNeedsRefresh(normalizedToken)) {
+    // 预检刷新：只要提供 refresh token，就优先换取新的 access token。
+    // 这样可以避免坏掉/不匹配的 access token 影响校验流程。
+    if (normalizedRefreshToken) {
       refreshAttempted = true
       const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
       const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
