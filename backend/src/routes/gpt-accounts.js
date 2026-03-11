@@ -103,6 +103,21 @@ const isJwtExpired = (token, skewMs = 30 * 1000) => {
   return expiryMs <= Date.now() + Math.max(0, Number(skewMs) || 0)
 }
 
+/**
+ * 判断 token 是否需要通过 refresh token 换新。
+ *
+ * 触发条件（满足任意一条即刷新）：
+ *  1. token 为空
+ *  2. 是合法 JWT 且已过期
+ *  3. 无法解析为合法 JWT（例如 sess-xxx session token）
+ */
+const tokenNeedsRefresh = (token) => {
+  const raw = String(token || '').trim()
+  if (!raw) return true
+  if (isJwtExpired(raw)) return true
+  if (inferJwtExpiryMs(raw) === null) return true
+  return false
+}
 
 const inferEmailFromTokens = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
@@ -381,28 +396,32 @@ const resolveImportTokens = async ({ token, refreshToken }) => {
     }
   }
 
-  // Import path: when refresh token is provided, always prefer refreshing once so that
-  // the persisted access token is as fresh as possible.
-  try {
-    const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
-    const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
-    if (!refreshedAccessToken) {
-      throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
-    }
-    return {
-      accessToken: refreshedAccessToken,
-      refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
-    }
-  } catch (error) {
-    // If refresh fails but we still have an original token, fall back to it rather than hard-failing.
-    if (normalizedToken) {
-      console.warn('resolveImportTokens: refresh token 刷新失败，回退使用原始 access token:', error?.message || error)
-      return {
-        accessToken: normalizedToken,
-        refreshToken: normalizedRefreshToken
+  if (tokenNeedsRefresh(normalizedToken)) {
+    try {
+      const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+      const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+      if (!refreshedAccessToken) {
+        throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
       }
+      return {
+        accessToken: refreshedAccessToken,
+        refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
+      }
+    } catch (error) {
+      if (normalizedToken) {
+        console.warn('resolveImportTokens: refresh token 刷新失败，回退使用原始 access token:', error?.message || error)
+        return {
+          accessToken: normalizedToken,
+          refreshToken: normalizedRefreshToken
+        }
+      }
+      throw error
     }
-    throw error
+  }
+
+  return {
+    accessToken: normalizedToken,
+    refreshToken: normalizedRefreshToken
   }
 }
 
@@ -627,29 +646,20 @@ router.post('/check-token', async (req, res) => {
     normalizedRefreshToken = String(refreshToken ?? '').trim()
     latestAccessToken = normalizedToken
 
-    // 只要提供了 refresh token，校验前就先尝试刷新一次。
-    // 这样即便 access token 看起来未过期，但已失效/类型不匹配，也能优先使用新 token 校验。
-    if (normalizedRefreshToken) {
+    // 预检刷新：token 为空 / 已过期 JWT / 非 JWT（如 sess-xxx）时，优先 refresh。
+    if (normalizedRefreshToken && tokenNeedsRefresh(normalizedToken)) {
       refreshAttempted = true
-      try {
-        const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
-        const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
-        if (!refreshedAccessToken) {
-          throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
-        }
-
-        latestAccessToken = refreshedAccessToken
-        latestIdToken = String(refreshedTokens?.idToken || '').trim()
-        normalizedToken = refreshedAccessToken
-        normalizedRefreshToken = String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
-        preflightRefreshed = true
-      } catch (preflightRefreshError) {
-        // 预检刷新失败时，保留原始 token 继续校验；后续仍会按 token 错误再尝试一次刷新。
-        if (!normalizedToken) {
-          throw preflightRefreshError
-        }
-        console.warn('check-token preflight refresh 失败，回退使用原始 access token:', preflightRefreshError?.message || preflightRefreshError)
+      const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+      const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+      if (!refreshedAccessToken) {
+        throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
       }
+
+      latestAccessToken = refreshedAccessToken
+      latestIdToken = String(refreshedTokens?.idToken || '').trim()
+      normalizedToken = refreshedAccessToken
+      normalizedRefreshToken = String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
+      preflightRefreshed = true
     }
 
     if (!normalizedToken) {
