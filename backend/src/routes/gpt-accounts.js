@@ -380,11 +380,34 @@ const resolveImportTokens = async ({ token, refreshToken }) => {
     }
   }
 
-  if (isJwtExpired(normalizedToken)) {
-    const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
-    return {
-      accessToken: String(refreshedTokens?.accessToken || '').trim(),
-      refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
+  // Refresh when:
+  // 1. No access token provided
+  // 2. JWT is detected as expired
+  // 3. JWT expiry can't be determined (no exp claim / not a valid JWT) — treat refresh token as source of truth
+  const expiryMs = inferJwtExpiryMs(normalizedToken)
+  const shouldRefresh = !normalizedToken || isJwtExpired(normalizedToken) || expiryMs === null
+
+  if (shouldRefresh) {
+    try {
+      const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+      const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+      if (!refreshedAccessToken) {
+        throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
+      }
+      return {
+        accessToken: refreshedAccessToken,
+        refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
+      }
+    } catch (error) {
+      // If refresh fails but we still have an original token, fall back to it rather than hard-failing
+      if (normalizedToken) {
+        console.warn('resolveImportTokens: refresh token 刷新失败，回退使用原始 access token:', error?.message || error)
+        return {
+          accessToken: normalizedToken,
+          refreshToken: normalizedRefreshToken
+        }
+      }
+      throw error
     }
   }
 
@@ -537,7 +560,7 @@ const checkSingleAccountStatus = async (db, account, nowMs) => {
   }
 }
 
-// 使用系统设置中的 API 密钥（x-api-key）标记账号为“封号”
+// 使用系统设置中的 API 密钥（x-api-key）标记账号为"封号"
 router.post('/ban', apiKeyAuth, async (req, res) => {
   try {
     const rawEmails = collectEmails(req.body)
@@ -615,7 +638,7 @@ router.post('/check-token', async (req, res) => {
     normalizedRefreshToken = String(refreshToken ?? '').trim()
     latestAccessToken = normalizedToken
 
-    // 如果 access token 本地解析已过期，则优先尝试 refresh，避免前端直接看到“token 过期”。
+    // 如果 access token 本地解析已过期，则优先尝试 refresh，避免前端直接看到"token 过期"。
     if (normalizedRefreshToken && isJwtExpired(normalizedToken)) {
       refreshAttempted = true
       const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
