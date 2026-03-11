@@ -137,6 +137,29 @@ const inferEmailFromTokens = ({ accessToken, idToken }) => {
   return ''
 }
 
+
+
+const shouldAttemptRefreshForTokenError = (error) => {
+  const status = Number(error?.status || error?.response?.status || 0)
+  const message = String(error?.message || '').toLowerCase()
+
+  if (status === 401 || status === 403 || status === 429) return true
+
+  const tokenKeywords = [
+    'token',
+    'expired',
+    'invalid',
+    'unauthorized',
+    'forbidden',
+    'auth',
+    '过期',
+    '无效',
+    '鉴权',
+    '未授权'
+  ]
+
+  return tokenKeywords.some(keyword => message.includes(keyword))
+}
 const inferTokenHints = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
   const accessPayload = decodeJwtPayloadSafely(accessToken)
@@ -544,10 +567,8 @@ router.post('/check-token', async (req, res) => {
         inferredChatgptAccountId: hints.inferredChatgptAccountId || null
       })
     } catch (error) {
-      const status = Number(error?.status || 0)
-      const message = String(error?.message || '')
-      const looksLikeExpiredToken = message.includes('Token 已过期或无效') || message.toLowerCase().includes('expired')
-      if ((status !== 401 && !looksLikeExpiredToken) || !normalizedRefreshToken) {
+      const canRetryWithRefresh = shouldAttemptRefreshForTokenError(error)
+      if (!canRetryWithRefresh || !normalizedRefreshToken) {
         throw error
       }
 
