@@ -93,11 +93,29 @@ const decodeJwtPayloadSafely = (token) => {
 const inferEmailFromTokens = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
   const accessPayload = decodeJwtPayloadSafely(accessToken)
+
+  const idProfile = idPayload?.['https://api.openai.com/profile'] || {}
+  const accessProfile = accessPayload?.['https://api.openai.com/profile'] || {}
+  const idAuthClaims = idPayload?.['https://api.openai.com/auth'] || {}
+  const accessAuthClaims = accessPayload?.['https://api.openai.com/auth'] || {}
+
   const candidates = [
     idPayload?.email,
     accessPayload?.email,
+    idPayload?.preferred_username,
     accessPayload?.preferred_username,
-    accessPayload?.upn
+    idPayload?.upn,
+    accessPayload?.upn,
+    idProfile?.email,
+    accessProfile?.email,
+    idPayload?.profile?.email,
+    accessPayload?.profile?.email,
+    idAuthClaims?.email,
+    accessAuthClaims?.email,
+    idPayload?.user?.email,
+    accessPayload?.user?.email,
+    idPayload?.['https://api.openai.com/user']?.email,
+    accessPayload?.['https://api.openai.com/user']?.email
   ]
 
   for (const value of candidates) {
@@ -105,9 +123,43 @@ const inferEmailFromTokens = ({ accessToken, idToken }) => {
     if (normalized) return normalized
   }
 
+  const scanObjects = [idProfile, accessProfile, idAuthClaims, accessAuthClaims, idPayload, accessPayload]
+  for (const source of scanObjects) {
+    if (!source || typeof source !== 'object') continue
+    for (const [key, value] of Object.entries(source)) {
+      if (typeof value !== 'string') continue
+      if (!/email/i.test(String(key))) continue
+      const normalized = normalizeEmail(value)
+      if (normalized) return normalized
+    }
+  }
+
   return ''
 }
 
+
+
+const shouldAttemptRefreshForTokenError = (error) => {
+  const status = Number(error?.status || error?.response?.status || 0)
+  const message = String(error?.message || '').toLowerCase()
+
+  if (status === 401 || status === 403 || status === 429) return true
+
+  const tokenKeywords = [
+    'token',
+    'expired',
+    'invalid',
+    'unauthorized',
+    'forbidden',
+    'auth',
+    '过期',
+    '无效',
+    '鉴权',
+    '未授权'
+  ]
+
+  return tokenKeywords.some(keyword => message.includes(keyword))
+}
 const inferTokenHints = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
   const accessPayload = decodeJwtPayloadSafely(accessToken)
@@ -223,26 +275,33 @@ const refreshAccessTokenWithRefreshToken = async (refreshToken) => {
     throw new AccountSyncError('该账号未配置 refresh token', 400)
   }
 
-  const requestData = new URLSearchParams({
-    grant_type: 'refresh_token',
-    client_id: OPENAI_CLIENT_ID,
-    refresh_token: normalized,
-    scope: 'openid profile email offline_access'
-  }).toString()
+  const buildRequestData = (withScope = true) => {
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: OPENAI_CLIENT_ID,
+      refresh_token: normalized
+    })
 
-  const requestOptions = {
-    method: 'POST',
-    url: 'https://auth.openai.com/oauth/token',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Content-Length': requestData.length
-    },
-    data: requestData,
-    timeout: 60000
+    if (withScope) {
+      params.set('scope', 'openid profile email offline_access')
+    }
+
+    return params.toString()
   }
 
-  try {
-    const response = await axios(requestOptions)
+  const requestRefresh = async (withScope = true) => {
+    const requestData = buildRequestData(withScope)
+    const response = await axios({
+      method: 'POST',
+      url: 'https://auth.openai.com/oauth/token',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': requestData.length
+      },
+      data: requestData,
+      timeout: 60000
+    })
+
     if (response.status !== 200 || !response.data?.access_token) {
       throw new AccountSyncError('刷新 token 失败，未返回有效凭证', 502)
     }
@@ -254,7 +313,23 @@ const refreshAccessTokenWithRefreshToken = async (refreshToken) => {
       idToken: resultData.id_token,
       expiresIn: resultData.expires_in || 3600
     }
+  }
+
+  try {
+    return await requestRefresh(true)
   } catch (error) {
+    const errorCode = String(error?.response?.data?.error || '').toLowerCase()
+    const errorDescription = String(error?.response?.data?.error_description || '').toLowerCase()
+    const canRetryWithoutScope = errorCode.includes('invalid_scope') || errorDescription.includes('scope')
+
+    if (canRetryWithoutScope) {
+      try {
+        return await requestRefresh(false)
+      } catch (retryError) {
+        error = retryError
+      }
+    }
+
     if (error?.response) {
       const message =
         error.response.data?.error?.message ||
@@ -515,10 +590,8 @@ router.post('/check-token', async (req, res) => {
         inferredChatgptAccountId: hints.inferredChatgptAccountId || null
       })
     } catch (error) {
-      const status = Number(error?.status || 0)
-      const message = String(error?.message || '')
-      const looksLikeExpiredToken = message.includes('Token 已过期或无效') || message.toLowerCase().includes('expired')
-      if ((status !== 401 && !looksLikeExpiredToken) || !normalizedRefreshToken) {
+      const canRetryWithRefresh = shouldAttemptRefreshForTokenError(error)
+      if (!canRetryWithRefresh || !normalizedRefreshToken) {
         throw error
       }
 
