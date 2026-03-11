@@ -369,6 +369,31 @@ const persistAccountTokens = async (db, accountId, tokens) => {
   return { accessToken: tokens.accessToken, refreshToken: nextRefreshToken || null }
 }
 
+const resolveImportTokens = async ({ token, refreshToken }) => {
+  const normalizedToken = String(token || '').trim()
+  const normalizedRefreshToken = String(refreshToken || '').trim().replace(/^Bearer\s+/i, '')
+
+  if (!normalizedRefreshToken) {
+    return {
+      accessToken: normalizedToken,
+      refreshToken: ''
+    }
+  }
+
+  if (isJwtExpired(normalizedToken)) {
+    const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+    return {
+      accessToken: String(refreshedTokens?.accessToken || '').trim(),
+      refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
+    }
+  }
+
+  return {
+    accessToken: normalizedToken,
+    refreshToken: normalizedRefreshToken
+  }
+}
+
 const loadAccountsForStatusCheck = async (db, { threshold }) => {
   const countResult = db.exec(
     `SELECT COUNT(*) FROM gpt_accounts WHERE created_at >= DATETIME('now', 'localtime', ?) AND COALESCE(is_banned, 0) = 0`,
@@ -982,6 +1007,11 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Email, token and ChatGPT ID are required' })
     }
 
+    const resolvedTokens = await resolveImportTokens({ token, refreshToken })
+    if (!resolvedTokens.accessToken) {
+      return res.status(400).json({ error: 'Access token is required' })
+    }
+
     if (expireAt != null && String(expireAt).trim() && !normalizedExpireAt) {
       return res.status(400).json({
         error: 'Invalid expireAt format',
@@ -998,7 +1028,16 @@ router.post('/', async (req, res) => {
 
     db.run(
       `INSERT INTO gpt_accounts (email, token, refresh_token, user_count, chatgpt_account_id, oai_device_id, expire_at, is_banned, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`,
-      [normalizedEmail, token, refreshToken || null, finalUserCount, normalizedChatgptAccountId, normalizedOaiDeviceId || null, normalizedExpireAt, isBannedValue]
+      [
+        normalizedEmail,
+        resolvedTokens.accessToken,
+        resolvedTokens.refreshToken || null,
+        finalUserCount,
+        normalizedChatgptAccountId,
+        normalizedOaiDeviceId || null,
+        normalizedExpireAt,
+        isBannedValue
+      ]
     )
 
 		    // 获取新创建账号的ID
@@ -1123,6 +1162,11 @@ router.put('/:id', async (req, res) => {
       return res.status(400).json({ error: 'Email, token and ChatGPT ID are required' })
     }
 
+    const resolvedTokens = await resolveImportTokens({ token, refreshToken })
+    if (!resolvedTokens.accessToken) {
+      return res.status(400).json({ error: 'Access token is required' })
+    }
+
     if (hasExpireAt && expireAt != null && String(expireAt).trim() && !normalizedExpireAt) {
       return res.status(400).json({
         error: 'Invalid expireAt format',
@@ -1156,8 +1200,8 @@ router.put('/:id', async (req, res) => {
        WHERE id = ?`,
       [
         email,
-        token,
-        refreshToken || null,
+        resolvedTokens.accessToken,
+        resolvedTokens.refreshToken || null,
         userCount || 0,
         normalizedChatgptAccountId,
         normalizedOaiDeviceId || null,
