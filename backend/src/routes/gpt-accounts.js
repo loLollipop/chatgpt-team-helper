@@ -71,6 +71,42 @@ const normalizeExpireAt = (value) => {
   return null
 }
 
+
+const decodeJwtPayloadSafely = (token) => {
+  const raw = String(token || '').trim().replace(/^Bearer\s+/i, '')
+  if (!raw) return null
+
+  const parts = raw.split('.')
+  if (parts.length < 2) return null
+
+  try {
+    const payloadSegment = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const paddedPayload = payloadSegment.padEnd(Math.ceil(payloadSegment.length / 4) * 4, '=')
+    const decoded = Buffer.from(paddedPayload, 'base64').toString('utf-8')
+    const payload = JSON.parse(decoded)
+    return payload && typeof payload === 'object' ? payload : null
+  } catch {
+    return null
+  }
+}
+
+const inferEmailFromTokens = ({ accessToken, idToken }) => {
+  const idPayload = decodeJwtPayloadSafely(idToken)
+  const accessPayload = decodeJwtPayloadSafely(accessToken)
+  const candidates = [
+    idPayload?.email,
+    accessPayload?.email,
+    accessPayload?.preferred_username,
+    accessPayload?.upn
+  ]
+
+  for (const value of candidates) {
+    const normalized = normalizeEmail(value)
+    if (normalized) return normalized
+  }
+
+  return ''
+}
 const collectEmails = (payload) => {
   if (!payload) return []
   if (Array.isArray(payload)) return payload
@@ -424,14 +460,44 @@ router.use(authenticateToken, requireMenu('accounts'))
 // 校验 access token，并返回可用的 Team 账号列表（用于新建账号时选择 chatgptAccountId）
 router.post('/check-token', async (req, res) => {
   try {
-    const { token, proxy } = req.body || {}
+    const { token, refreshToken, proxy } = req.body || {}
     const normalizedToken = String(token ?? '').trim()
+    const normalizedRefreshToken = String(refreshToken ?? '').trim()
     if (!normalizedToken) {
       return res.status(400).json({ error: 'token is required' })
     }
 
-    const accounts = await fetchOpenAiAccountInfo(normalizedToken, proxy ?? null)
-    return res.json({ accounts })
+    try {
+      const accounts = await fetchOpenAiAccountInfo(normalizedToken, proxy ?? null)
+      const inferredEmail = inferEmailFromTokens({ accessToken: normalizedToken })
+      return res.json({ accounts, tokenRefreshed: false, inferredEmail: inferredEmail || null })
+    } catch (error) {
+      const status = Number(error?.status || 0)
+      if (status !== 401 || !normalizedRefreshToken) {
+        throw error
+      }
+
+      const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+      const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+      if (!refreshedAccessToken) {
+        throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
+      }
+
+      const refreshedAccounts = await fetchOpenAiAccountInfo(refreshedAccessToken, proxy ?? null)
+      const inferredEmail = inferEmailFromTokens({
+        accessToken: refreshedAccessToken,
+        idToken: refreshedTokens?.idToken
+      })
+      return res.json({
+        accounts: refreshedAccounts,
+        tokenRefreshed: true,
+        inferredEmail: inferredEmail || null,
+        tokens: {
+          accessToken: refreshedAccessToken,
+          refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim() || null
+        }
+      })
+    }
   } catch (error) {
     console.error('Check GPT token error:', error)
 
