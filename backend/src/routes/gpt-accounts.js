@@ -93,29 +93,11 @@ const decodeJwtPayloadSafely = (token) => {
 const inferEmailFromTokens = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
   const accessPayload = decodeJwtPayloadSafely(accessToken)
-
-  const idProfile = idPayload?.['https://api.openai.com/profile'] || {}
-  const accessProfile = accessPayload?.['https://api.openai.com/profile'] || {}
-  const idAuthClaims = idPayload?.['https://api.openai.com/auth'] || {}
-  const accessAuthClaims = accessPayload?.['https://api.openai.com/auth'] || {}
-
   const candidates = [
     idPayload?.email,
     accessPayload?.email,
-    idPayload?.preferred_username,
     accessPayload?.preferred_username,
-    idPayload?.upn,
-    accessPayload?.upn,
-    idProfile?.email,
-    accessProfile?.email,
-    idPayload?.profile?.email,
-    accessPayload?.profile?.email,
-    idAuthClaims?.email,
-    accessAuthClaims?.email,
-    idPayload?.user?.email,
-    accessPayload?.user?.email,
-    idPayload?.['https://api.openai.com/user']?.email,
-    accessPayload?.['https://api.openai.com/user']?.email
+    accessPayload?.upn
   ]
 
   for (const value of candidates) {
@@ -123,43 +105,9 @@ const inferEmailFromTokens = ({ accessToken, idToken }) => {
     if (normalized) return normalized
   }
 
-  const scanObjects = [idProfile, accessProfile, idAuthClaims, accessAuthClaims, idPayload, accessPayload]
-  for (const source of scanObjects) {
-    if (!source || typeof source !== 'object') continue
-    for (const [key, value] of Object.entries(source)) {
-      if (typeof value !== 'string') continue
-      if (!/email/i.test(String(key))) continue
-      const normalized = normalizeEmail(value)
-      if (normalized) return normalized
-    }
-  }
-
   return ''
 }
 
-
-
-const shouldAttemptRefreshForTokenError = (error) => {
-  const status = Number(error?.status || error?.response?.status || 0)
-  const message = String(error?.message || '').toLowerCase()
-
-  if (status === 401 || status === 403 || status === 429) return true
-
-  const tokenKeywords = [
-    'token',
-    'expired',
-    'invalid',
-    'unauthorized',
-    'forbidden',
-    'auth',
-    '过期',
-    '无效',
-    '鉴权',
-    '未授权'
-  ]
-
-  return tokenKeywords.some(keyword => message.includes(keyword))
-}
 const inferTokenHints = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
   const accessPayload = decodeJwtPayloadSafely(accessToken)
@@ -567,8 +515,10 @@ router.post('/check-token', async (req, res) => {
         inferredChatgptAccountId: hints.inferredChatgptAccountId || null
       })
     } catch (error) {
-      const canRetryWithRefresh = shouldAttemptRefreshForTokenError(error)
-      if (!canRetryWithRefresh || !normalizedRefreshToken) {
+      const status = Number(error?.status || 0)
+      const message = String(error?.message || '')
+      const looksLikeExpiredToken = message.includes('Token 已过期或无效') || message.toLowerCase().includes('expired')
+      if ((status !== 401 && !looksLikeExpiredToken) || !normalizedRefreshToken) {
         throw error
       }
 
