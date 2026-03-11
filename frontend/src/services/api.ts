@@ -384,6 +384,12 @@ export interface ChatgptAccountCheckInfo {
 
 export interface CheckGptAccessTokenResponse {
   accounts: ChatgptAccountCheckInfo[]
+  tokenRefreshed?: boolean
+  inferredEmail?: string | null
+  tokens?: {
+    accessToken: string
+    refreshToken?: string | null
+  }
 }
 
 export interface ChatgptAccountUser {
@@ -1665,8 +1671,8 @@ export const gptAccountService = {
     await api.delete(`/gpt-accounts/${id}`)
   },
 
-  async checkAccessToken(token: string): Promise<CheckGptAccessTokenResponse> {
-    const response = await api.post('/gpt-accounts/check-token', { token })
+  async checkAccessToken(token: string, refreshToken?: string): Promise<CheckGptAccessTokenResponse> {
+    const response = await api.post('/gpt-accounts/check-token', { token, refreshToken })
     return response.data
   },
 

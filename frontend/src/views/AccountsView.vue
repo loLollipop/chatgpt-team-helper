@@ -522,15 +522,29 @@ const handleCheckAccessToken = async () => {
     checkingAccessToken.value = true
     checkAccessTokenError.value = ''
 
-    const result = await gptAccountService.checkAccessToken(token)
+    const refreshToken = String(formData.value.refreshToken || '').trim()
+    const result = await gptAccountService.checkAccessToken(token, refreshToken || undefined)
     checkedChatgptAccounts.value = Array.isArray(result?.accounts) ? result.accounts : []
+
+    if (result?.tokenRefreshed && result?.tokens?.accessToken) {
+      formData.value.token = String(result.tokens.accessToken || '').trim()
+      if (result?.tokens?.refreshToken) {
+        formData.value.refreshToken = String(result.tokens.refreshToken || '').trim()
+      }
+    }
+
+    if (result?.inferredEmail) {
+      formData.value.email = String(result.inferredEmail || '').trim()
+    }
 
     if (!checkedChatgptAccounts.value.length) {
       showErrorToast('校验成功，但未返回可用账号（可能没有 Team 账号权限）')
       return
     }
 
-    showSuccessToast(`校验成功：获取到 ${checkedChatgptAccounts.value.length} 个账号`)
+    showSuccessToast(result?.tokenRefreshed
+      ? `Access Token 已自动刷新，校验成功：获取到 ${checkedChatgptAccounts.value.length} 个账号`
+      : `校验成功：获取到 ${checkedChatgptAccounts.value.length} 个账号`)
 
     // If user hasn't filled chatgptAccountId yet and there is only 1 option, autofill it.
     if (!String(formData.value.chatgptAccountId || '').trim() && checkedChatgptAccounts.value.length === 1) {
