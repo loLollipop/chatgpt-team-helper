@@ -107,6 +107,36 @@ const inferEmailFromTokens = ({ accessToken, idToken }) => {
 
   return ''
 }
+
+const inferTokenHints = ({ accessToken, idToken }) => {
+  const idPayload = decodeJwtPayloadSafely(idToken)
+  const accessPayload = decodeJwtPayloadSafely(accessToken)
+  const idAuthClaims = idPayload?.['https://api.openai.com/auth'] || {}
+  const accessAuthClaims = accessPayload?.['https://api.openai.com/auth'] || {}
+
+  const inferredEmail = inferEmailFromTokens({ accessToken, idToken })
+  const accountIdCandidates = [
+    idAuthClaims?.chatgpt_account_id,
+    accessAuthClaims?.chatgpt_account_id,
+    idPayload?.chatgpt_account_id,
+    accessPayload?.chatgpt_account_id
+  ]
+
+  let inferredChatgptAccountId = ''
+  for (const value of accountIdCandidates) {
+    const normalized = String(value || '').trim()
+    if (normalized) {
+      inferredChatgptAccountId = normalized
+      break
+    }
+  }
+
+  return {
+    inferredEmail,
+    inferredChatgptAccountId
+  }
+}
+
 const collectEmails = (payload) => {
   if (!payload) return []
   if (Array.isArray(payload)) return payload
@@ -459,18 +489,31 @@ router.use(authenticateToken, requireMenu('accounts'))
 
 // 校验 access token，并返回可用的 Team 账号列表（用于新建账号时选择 chatgptAccountId）
 router.post('/check-token', async (req, res) => {
+  let normalizedToken = ''
+  let normalizedRefreshToken = ''
+  let latestAccessToken = ''
+  let latestIdToken = ''
+  let refreshAttempted = false
+
   try {
     const { token, refreshToken, proxy } = req.body || {}
-    const normalizedToken = String(token ?? '').trim()
-    const normalizedRefreshToken = String(refreshToken ?? '').trim()
+    normalizedToken = String(token ?? '').trim()
+    normalizedRefreshToken = String(refreshToken ?? '').trim()
+    latestAccessToken = normalizedToken
+
     if (!normalizedToken) {
       return res.status(400).json({ error: 'token is required' })
     }
 
     try {
       const accounts = await fetchOpenAiAccountInfo(normalizedToken, proxy ?? null)
-      const inferredEmail = inferEmailFromTokens({ accessToken: normalizedToken })
-      return res.json({ accounts, tokenRefreshed: false, inferredEmail: inferredEmail || null })
+      const hints = inferTokenHints({ accessToken: normalizedToken })
+      return res.json({
+        accounts,
+        tokenRefreshed: false,
+        inferredEmail: hints.inferredEmail || null,
+        inferredChatgptAccountId: hints.inferredChatgptAccountId || null
+      })
     } catch (error) {
       const status = Number(error?.status || 0)
       const message = String(error?.message || '')
@@ -479,8 +522,12 @@ router.post('/check-token', async (req, res) => {
         throw error
       }
 
+      refreshAttempted = true
       const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
       const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+      latestAccessToken = refreshedAccessToken
+      latestIdToken = String(refreshedTokens?.idToken || '').trim()
+
       if (!refreshedAccessToken) {
         throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
       }
@@ -496,14 +543,17 @@ router.post('/check-token', async (req, res) => {
         }
         throw recheckError
       }
-      const inferredEmail = inferEmailFromTokens({
+
+      const hints = inferTokenHints({
         accessToken: refreshedAccessToken,
         idToken: refreshedTokens?.idToken
       })
+
       return res.json({
         accounts: refreshedAccounts,
         tokenRefreshed: true,
-        inferredEmail: inferredEmail || null,
+        inferredEmail: hints.inferredEmail || null,
+        inferredChatgptAccountId: hints.inferredChatgptAccountId || null,
         tokens: {
           accessToken: refreshedAccessToken,
           refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim() || null
@@ -513,11 +563,26 @@ router.post('/check-token', async (req, res) => {
   } catch (error) {
     console.error('Check GPT token error:', error)
 
+    const hints = inferTokenHints({
+      accessToken: latestAccessToken || normalizedToken,
+      idToken: latestIdToken
+    })
+
     if (error instanceof AccountSyncError || error?.status) {
-      return res.status(error.status || 500).json({ error: error.message })
+      return res.status(error.status || 500).json({
+        error: error.message,
+        tokenRefreshedAttempted: refreshAttempted,
+        inferredEmail: hints.inferredEmail || null,
+        inferredChatgptAccountId: hints.inferredChatgptAccountId || null
+      })
     }
 
-    return res.status(500).json({ error: '内部服务器错误' })
+    return res.status(500).json({
+      error: '内部服务器错误',
+      tokenRefreshedAttempted: refreshAttempted,
+      inferredEmail: hints.inferredEmail || null,
+      inferredChatgptAccountId: hints.inferredChatgptAccountId || null
+    })
   }
 })
 
