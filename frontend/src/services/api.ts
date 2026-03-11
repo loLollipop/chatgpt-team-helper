@@ -385,7 +385,9 @@ export interface ChatgptAccountCheckInfo {
 export interface CheckGptAccessTokenResponse {
   accounts: ChatgptAccountCheckInfo[]
   tokenRefreshed?: boolean
+  tokenRefreshedAttempted?: boolean
   inferredEmail?: string | null
+  inferredChatgptAccountId?: string | null
   tokens?: {
     accessToken: string
     refreshToken?: string | null
