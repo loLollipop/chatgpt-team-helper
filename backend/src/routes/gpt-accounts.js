@@ -71,6 +71,124 @@ const normalizeExpireAt = (value) => {
   return null
 }
 
+
+const decodeJwtPayloadSafely = (token) => {
+  const raw = String(token || '').trim().replace(/^Bearer\s+/i, '')
+  if (!raw) return null
+
+  const parts = raw.split('.')
+  if (parts.length < 2) return null
+
+  try {
+    const payloadSegment = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const paddedPayload = payloadSegment.padEnd(Math.ceil(payloadSegment.length / 4) * 4, '=')
+    const decoded = Buffer.from(paddedPayload, 'base64').toString('utf-8')
+    const payload = JSON.parse(decoded)
+    return payload && typeof payload === 'object' ? payload : null
+  } catch {
+    return null
+  }
+}
+
+const inferEmailFromTokens = ({ accessToken, idToken }) => {
+  const idPayload = decodeJwtPayloadSafely(idToken)
+  const accessPayload = decodeJwtPayloadSafely(accessToken)
+
+  const idProfile = idPayload?.['https://api.openai.com/profile'] || {}
+  const accessProfile = accessPayload?.['https://api.openai.com/profile'] || {}
+  const idAuthClaims = idPayload?.['https://api.openai.com/auth'] || {}
+  const accessAuthClaims = accessPayload?.['https://api.openai.com/auth'] || {}
+
+  const candidates = [
+    idPayload?.email,
+    accessPayload?.email,
+    idPayload?.preferred_username,
+    accessPayload?.preferred_username,
+    idPayload?.upn,
+    accessPayload?.upn,
+    idProfile?.email,
+    accessProfile?.email,
+    idPayload?.profile?.email,
+    accessPayload?.profile?.email,
+    idAuthClaims?.email,
+    accessAuthClaims?.email,
+    idPayload?.user?.email,
+    accessPayload?.user?.email,
+    idPayload?.['https://api.openai.com/user']?.email,
+    accessPayload?.['https://api.openai.com/user']?.email
+  ]
+
+  for (const value of candidates) {
+    const normalized = normalizeEmail(value)
+    if (normalized) return normalized
+  }
+
+  const scanObjects = [idProfile, accessProfile, idAuthClaims, accessAuthClaims, idPayload, accessPayload]
+  for (const source of scanObjects) {
+    if (!source || typeof source !== 'object') continue
+    for (const [key, value] of Object.entries(source)) {
+      if (typeof value !== 'string') continue
+      if (!/email/i.test(String(key))) continue
+      const normalized = normalizeEmail(value)
+      if (normalized) return normalized
+    }
+  }
+
+  return ''
+}
+
+
+
+const shouldAttemptRefreshForTokenError = (error) => {
+  const status = Number(error?.status || error?.response?.status || 0)
+  const message = String(error?.message || '').toLowerCase()
+
+  if (status === 401 || status === 403 || status === 429) return true
+
+  const tokenKeywords = [
+    'token',
+    'expired',
+    'invalid',
+    'unauthorized',
+    'forbidden',
+    'auth',
+    '过期',
+    '无效',
+    '鉴权',
+    '未授权'
+  ]
+
+  return tokenKeywords.some(keyword => message.includes(keyword))
+}
+const inferTokenHints = ({ accessToken, idToken }) => {
+  const idPayload = decodeJwtPayloadSafely(idToken)
+  const accessPayload = decodeJwtPayloadSafely(accessToken)
+  const idAuthClaims = idPayload?.['https://api.openai.com/auth'] || {}
+  const accessAuthClaims = accessPayload?.['https://api.openai.com/auth'] || {}
+
+  const inferredEmail = inferEmailFromTokens({ accessToken, idToken })
+  const accountIdCandidates = [
+    idAuthClaims?.chatgpt_account_id,
+    accessAuthClaims?.chatgpt_account_id,
+    idPayload?.chatgpt_account_id,
+    accessPayload?.chatgpt_account_id
+  ]
+
+  let inferredChatgptAccountId = ''
+  for (const value of accountIdCandidates) {
+    const normalized = String(value || '').trim()
+    if (normalized) {
+      inferredChatgptAccountId = normalized
+      break
+    }
+  }
+
+  return {
+    inferredEmail,
+    inferredChatgptAccountId
+  }
+}
+
 const collectEmails = (payload) => {
   if (!payload) return []
   if (Array.isArray(payload)) return payload
@@ -157,26 +275,33 @@ const refreshAccessTokenWithRefreshToken = async (refreshToken) => {
     throw new AccountSyncError('该账号未配置 refresh token', 400)
   }
 
-  const requestData = new URLSearchParams({
-    grant_type: 'refresh_token',
-    client_id: OPENAI_CLIENT_ID,
-    refresh_token: normalized,
-    scope: 'openid profile email'
-  }).toString()
+  const buildRequestData = (withScope = true) => {
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: OPENAI_CLIENT_ID,
+      refresh_token: normalized
+    })
 
-  const requestOptions = {
-    method: 'POST',
-    url: 'https://auth.openai.com/oauth/token',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Content-Length': requestData.length
-    },
-    data: requestData,
-    timeout: 60000
+    if (withScope) {
+      params.set('scope', 'openid profile email offline_access')
+    }
+
+    return params.toString()
   }
 
-  try {
-    const response = await axios(requestOptions)
+  const requestRefresh = async (withScope = true) => {
+    const requestData = buildRequestData(withScope)
+    const response = await axios({
+      method: 'POST',
+      url: 'https://auth.openai.com/oauth/token',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': requestData.length
+      },
+      data: requestData,
+      timeout: 60000
+    })
+
     if (response.status !== 200 || !response.data?.access_token) {
       throw new AccountSyncError('刷新 token 失败，未返回有效凭证', 502)
     }
@@ -188,7 +313,23 @@ const refreshAccessTokenWithRefreshToken = async (refreshToken) => {
       idToken: resultData.id_token,
       expiresIn: resultData.expires_in || 3600
     }
+  }
+
+  try {
+    return await requestRefresh(true)
   } catch (error) {
+    const errorCode = String(error?.response?.data?.error || '').toLowerCase()
+    const errorDescription = String(error?.response?.data?.error_description || '').toLowerCase()
+    const canRetryWithoutScope = errorCode.includes('invalid_scope') || errorDescription.includes('scope')
+
+    if (canRetryWithoutScope) {
+      try {
+        return await requestRefresh(false)
+      } catch (retryError) {
+        error = retryError
+      }
+    }
+
     if (error?.response) {
       const message =
         error.response.data?.error?.message ||
@@ -423,23 +564,98 @@ router.use(authenticateToken, requireMenu('accounts'))
 
 // 校验 access token，并返回可用的 Team 账号列表（用于新建账号时选择 chatgptAccountId）
 router.post('/check-token', async (req, res) => {
+  let normalizedToken = ''
+  let normalizedRefreshToken = ''
+  let latestAccessToken = ''
+  let latestIdToken = ''
+  let refreshAttempted = false
+
   try {
-    const { token, proxy } = req.body || {}
-    const normalizedToken = String(token ?? '').trim()
+    const { token, refreshToken, proxy } = req.body || {}
+    normalizedToken = String(token ?? '').trim()
+    normalizedRefreshToken = String(refreshToken ?? '').trim()
+    latestAccessToken = normalizedToken
+
     if (!normalizedToken) {
       return res.status(400).json({ error: 'token is required' })
     }
 
-    const accounts = await fetchOpenAiAccountInfo(normalizedToken, proxy ?? null)
-    return res.json({ accounts })
+    try {
+      const accounts = await fetchOpenAiAccountInfo(normalizedToken, proxy ?? null)
+      const hints = inferTokenHints({ accessToken: normalizedToken })
+      return res.json({
+        accounts,
+        tokenRefreshed: false,
+        inferredEmail: hints.inferredEmail || null,
+        inferredChatgptAccountId: hints.inferredChatgptAccountId || null
+      })
+    } catch (error) {
+      const canRetryWithRefresh = shouldAttemptRefreshForTokenError(error)
+      if (!canRetryWithRefresh || !normalizedRefreshToken) {
+        throw error
+      }
+
+      refreshAttempted = true
+      const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+      const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+      latestAccessToken = refreshedAccessToken
+      latestIdToken = String(refreshedTokens?.idToken || '').trim()
+
+      if (!refreshedAccessToken) {
+        throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
+      }
+
+      let refreshedAccounts
+      try {
+        refreshedAccounts = await fetchOpenAiAccountInfo(refreshedAccessToken, proxy ?? null)
+      } catch (recheckError) {
+        const reStatus = Number(recheckError?.status || 0)
+        const reMessage = String(recheckError?.message || '')
+        if (reStatus === 401 || reMessage.includes('Token 已过期或无效')) {
+          throw new AccountSyncError('Access Token 已刷新，但仍校验失败：请确认 refresh token 与 access token 属于同一账号', 401)
+        }
+        throw recheckError
+      }
+
+      const hints = inferTokenHints({
+        accessToken: refreshedAccessToken,
+        idToken: refreshedTokens?.idToken
+      })
+
+      return res.json({
+        accounts: refreshedAccounts,
+        tokenRefreshed: true,
+        inferredEmail: hints.inferredEmail || null,
+        inferredChatgptAccountId: hints.inferredChatgptAccountId || null,
+        tokens: {
+          accessToken: refreshedAccessToken,
+          refreshToken: String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim() || null
+        }
+      })
+    }
   } catch (error) {
     console.error('Check GPT token error:', error)
 
+    const hints = inferTokenHints({
+      accessToken: latestAccessToken || normalizedToken,
+      idToken: latestIdToken
+    })
+
     if (error instanceof AccountSyncError || error?.status) {
-      return res.status(error.status || 500).json({ error: error.message })
+      return res.status(error.status || 500).json({
+        error: error.message,
+        tokenRefreshedAttempted: refreshAttempted,
+        inferredEmail: hints.inferredEmail || null,
+        inferredChatgptAccountId: hints.inferredChatgptAccountId || null
+      })
     }
 
-    return res.status(500).json({ error: '内部服务器错误' })
+    return res.status(500).json({
+      error: '内部服务器错误',
+      tokenRefreshedAttempted: refreshAttempted,
+      inferredEmail: hints.inferredEmail || null,
+      inferredChatgptAccountId: hints.inferredChatgptAccountId || null
+    })
   }
 })
 
