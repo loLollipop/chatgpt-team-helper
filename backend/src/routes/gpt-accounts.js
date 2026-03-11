@@ -103,14 +103,6 @@ const isJwtExpired = (token, skewMs = 30 * 1000) => {
   return expiryMs <= Date.now() + Math.max(0, Number(skewMs) || 0)
 }
 
-const shouldRefreshTokenBeforeCheck = (token) => {
-  const normalizedToken = String(token || '').trim()
-  if (!normalizedToken) return true
-  const expiryMs = inferJwtExpiryMs(normalizedToken)
-  // Non-JWT / no-exp token (e.g. sess-xxx) should refresh when refresh_token is provided.
-  if (expiryMs == null) return true
-  return isJwtExpired(normalizedToken)
-}
 
 const inferEmailFromTokens = ({ accessToken, idToken }) => {
   const idPayload = decodeJwtPayloadSafely(idToken)
@@ -635,20 +627,29 @@ router.post('/check-token', async (req, res) => {
     normalizedRefreshToken = String(refreshToken ?? '').trim()
     latestAccessToken = normalizedToken
 
-    // 如果 access token 为空、已过期，或不是可解析 exp 的 JWT（如 sess-xxx），则优先 refresh。
-    if (normalizedRefreshToken && shouldRefreshTokenBeforeCheck(normalizedToken)) {
+    // 只要提供了 refresh token，校验前就先尝试刷新一次。
+    // 这样即便 access token 看起来未过期，但已失效/类型不匹配，也能优先使用新 token 校验。
+    if (normalizedRefreshToken) {
       refreshAttempted = true
-      const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
-      const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
-      if (!refreshedAccessToken) {
-        throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
-      }
+      try {
+        const refreshedTokens = await refreshAccessTokenWithRefreshToken(normalizedRefreshToken)
+        const refreshedAccessToken = String(refreshedTokens?.accessToken || '').trim()
+        if (!refreshedAccessToken) {
+          throw new AccountSyncError('刷新 token 失败：未返回新的 access token', 502)
+        }
 
-      latestAccessToken = refreshedAccessToken
-      latestIdToken = String(refreshedTokens?.idToken || '').trim()
-      normalizedToken = refreshedAccessToken
-      normalizedRefreshToken = String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
-      preflightRefreshed = true
+        latestAccessToken = refreshedAccessToken
+        latestIdToken = String(refreshedTokens?.idToken || '').trim()
+        normalizedToken = refreshedAccessToken
+        normalizedRefreshToken = String(refreshedTokens?.refreshToken || normalizedRefreshToken).trim()
+        preflightRefreshed = true
+      } catch (preflightRefreshError) {
+        // 预检刷新失败时，保留原始 token 继续校验；后续仍会按 token 错误再尝试一次刷新。
+        if (!normalizedToken) {
+          throw preflightRefreshError
+        }
+        console.warn('check-token preflight refresh 失败，回退使用原始 access token:', preflightRefreshError?.message || preflightRefreshError)
+      }
     }
 
     if (!normalizedToken) {
@@ -1023,6 +1024,12 @@ router.post('/', async (req, res) => {
     const normalizedOaiDeviceId = String(oaiDeviceId ?? '').trim()
     const normalizedExpireAt = normalizeExpireAt(expireAt)
 
+    const hasToken = Boolean(String(token || '').trim())
+    const hasRefreshToken = Boolean(String(refreshToken || '').trim())
+    if (!hasToken && !hasRefreshToken) {
+      return res.status(400).json({ error: 'Token 或 refresh token 至少需要提供一个' })
+    }
+
     const resolvedTokens = await resolveImportTokens({ token, refreshToken })
     if (!resolvedTokens.accessToken) {
       return res.status(400).json({ error: 'Access token is required' })
@@ -1184,6 +1191,12 @@ router.put('/:id', async (req, res) => {
     const shouldUpdateIsBanned = hasIsBanned
     const isBannedValue = normalizedIsBanned ? 1 : 0
     const shouldApplyBanSideEffects = shouldUpdateIsBanned && isBannedValue === 1
+
+    const hasToken = Boolean(String(token || '').trim())
+    const hasRefreshToken = Boolean(String(refreshToken || '').trim())
+    if (!hasToken && !hasRefreshToken) {
+      return res.status(400).json({ error: 'Token 或 refresh token 至少需要提供一个' })
+    }
 
     const resolvedTokens = await resolveImportTokens({ token, refreshToken })
     if (!resolvedTokens.accessToken) {
