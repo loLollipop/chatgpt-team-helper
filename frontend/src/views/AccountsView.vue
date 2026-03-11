@@ -1710,7 +1710,6 @@ const handleInviteSubmit = async () => {
                 <div class="flex items-center gap-2">
                   <Input
                     v-model="formData.token"
-                    required
                     placeholder="eyJhbGciOi..."
                     class="h-11 flex-1 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
                   />
@@ -1719,7 +1718,7 @@ const handleInviteSubmit = async () => {
                     size="sm"
                     variant="outline"
                     class="h-11 rounded-xl border-gray-200"
-                    :disabled="checkingAccessToken || !formData.token?.trim()"
+                    :disabled="checkingAccessToken || (!formData.token?.trim() && !formData.refreshToken?.trim())"
                     @click="handleCheckAccessToken"
                   >
                     <template v-if="checkingAccessToken">
